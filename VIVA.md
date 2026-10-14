@@ -1,0 +1,12 @@
+# Viva guide: 10 questions and answers
+
+1. **What is your project?** It manages hospital beds, admissions, emergency reservations, cleaning, and a severity-based waiting list. It is a college demonstration, not a clinical decision system.
+2. **Where do you use inheritance?** Patient, Doctor and Nurse inherit from Person. GeneralBed, ICUBed and IsolationBed inherit from Bed.
+3. **What is abstraction?** It defines what an object must do without specifying every detail. Person and Bed are abstract base classes. You cannot directly create them; subclasses implement their abstract methods.
+4. **Where is polymorphism?** BedAllocator calls supports() and score() on different bed objects. The same method call uses each object's bed-specific rules. Cleaning durations also depend on the subtype.
+5. **What is encapsulation?** Data is stored in private, double-underscore fields and accessed through properties. Person.name has a getter and a validating setter. Patient's clinical fields are read-only properties. Python name mangling discourages accidental access; it is not a security boundary.
+6. **How do you pick the best bed?** Filter to ready beds that match ward gender and condition. Prefer general beds for general patients and preserve ventilators when unnecessary. Then choose the shortest seeded distance, with bed ID as a tie-breaker. Emergency reservations put distance first among suitable ICU beds.
+7. **How does the waiting list work?** Severity 5 comes first, then earliest arrival, then patient ID. If the first patient cannot use a free bed, the next compatible patient can use it. The queue is processed inside a database transaction.
+8. **Why cannot a dirty bed be allocated?** Discharge changes an occupied bed to cleaning with a persistent deadline. Only ready beds pass allocation. On a later request, elapsed cleaning changes the bed to ready and triggers waiting-list assignment.
+9. **How do you prevent two patients getting the same bed?** SQLite BEGIN IMMEDIATE serializes writes, and patients.bed_id has a UNIQUE constraint. Allocation and bed updates happen in the same transaction.
+10. **Why Flask and SQLite, and what would you improve?** Flask makes a small REST API and SQLite needs no separate database server. Real deployment would need staff authentication, authorization, audit logs, clinical approvals, robust backups, and a persistent production database. A free Render filesystem can lose SQLite data.
