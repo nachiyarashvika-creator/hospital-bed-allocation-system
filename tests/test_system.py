@@ -5,6 +5,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from app import create_app
 from database import connect
+from werkzeug.security import generate_password_hash
 from models import Person, Patient, Doctor, Nurse, bed_from_row
 
 
@@ -14,7 +15,15 @@ class SystemTests(unittest.TestCase):
         self.path = os.path.join(self.temp.name, 'test.db')
         self.app = create_app(self.path)
         self.app.config['TESTING'] = True
+        with connect(self.path) as db:
+            self.user_id = db.execute('INSERT INTO users(hospital_id,email,password_hash) VALUES (1,?,?)', ('test@example.com',generate_password_hash('test-password-long'))).lastrowid
         self.client = self.app.test_client()
+        self.authenticate(self.client)
+
+    def authenticate(self, client):
+        with client.session_transaction() as session:
+            session['user_id'] = self.user_id
+            session['csrf_token'] = 'test-token'
 
     def tearDown(self):
         self.temp.cleanup()
@@ -37,7 +46,7 @@ class SystemTests(unittest.TestCase):
 
     def test_gender_and_specialized_allocation(self):
         for condition, expected in [('general','general'),('isolation','isolation'),('ventilator','icu')]:
-            r = self.client.post('/api/admit',json=self.patient(condition=condition))
+            r = self.client.post('/api/admit',headers={'X-CSRF-Token':'test-token'},json=self.patient(condition=condition))
             self.assertEqual(r.status_code, 201)
             bed = r.get_json()['bed']
             self.assertEqual(bed['kind'], expected)
@@ -46,13 +55,13 @@ class SystemTests(unittest.TestCase):
                 self.assertEqual(bed['ventilator'], 1)
 
     def test_dirty_bed_cannot_allocate_and_queue_priority(self):
-        self.client.post('/api/patients/1/discharge',json={})
+        self.client.post('/api/patients/1/discharge',headers={'X-CSRF-Token':'test-token'},json={})
         with connect(self.path) as db:
             self.assertEqual(db.execute('SELECT status FROM beds WHERE id=1').fetchone()[0], 'cleaning')
             # Reserve the remaining ready beds to force an actual waiting queue.
             db.execute("UPDATE beds SET status='reserved' WHERE status='ready'")
-        low = self.client.post('/api/admit',json=self.patient(name='Low',severity=1)).get_json()
-        high = self.client.post('/api/admit',json=self.patient(name='High',severity=5)).get_json()
+        low = self.client.post('/api/admit',headers={'X-CSRF-Token':'test-token'},json=self.patient(name='Low',severity=1)).get_json()
+        high = self.client.post('/api/admit',headers={'X-CSRF-Token':'test-token'},json=self.patient(name='High',severity=5)).get_json()
         self.assertEqual(high['status'],'waiting')
         self.assertEqual(low['status'],'waiting')
         with connect(self.path) as db:
@@ -64,9 +73,9 @@ class SystemTests(unittest.TestCase):
     def test_fifo_and_skip_incompatible(self):
         with connect(self.path) as db:
             db.execute("UPDATE beds SET status='reserved' WHERE status='ready'")
-        incompatible = self.client.post('/api/admit',json=self.patient(condition='isolation',severity=5)).get_json()
-        first = self.client.post('/api/admit',json=self.patient(name='First')).get_json()
-        second = self.client.post('/api/admit',json=self.patient(name='Second')).get_json()
+        incompatible = self.client.post('/api/admit',headers={'X-CSRF-Token':'test-token'},json=self.patient(condition='isolation',severity=5)).get_json()
+        first = self.client.post('/api/admit',headers={'X-CSRF-Token':'test-token'},json=self.patient(name='First')).get_json()
+        second = self.client.post('/api/admit',headers={'X-CSRF-Token':'test-token'},json=self.patient(name='Second')).get_json()
         with connect(self.path) as db:
             db.execute("UPDATE beds SET status='ready' WHERE id=2")
         patients = {p['id']:p for p in self.state()['patients']}
@@ -75,15 +84,15 @@ class SystemTests(unittest.TestCase):
         self.assertEqual(patients[incompatible['patient_id']]['status'],'waiting')
 
     def test_emergency_nearest_confirm_and_cancel(self):
-        r = self.client.post('/api/emergency',json=self.patient(condition='ventilator',severity=5)).get_json()
+        r = self.client.post('/api/emergency',headers={'X-CSRF-Token':'test-token'},json=self.patient(condition='ventilator',severity=5)).get_json()
         self.assertEqual(r['bed']['id'],6)
         self.assertEqual(r['status'],'reserved')
-        self.assertEqual(self.client.post(f"/api/patients/{r['patient_id']}/confirm",json={}).status_code,200)
-        self.client.post(f"/api/patients/{r['patient_id']}/discharge",json={})
+        self.assertEqual(self.client.post(f"/api/patients/{r['patient_id']}/confirm",headers={'X-CSRF-Token':'test-token'},json={}).status_code,200)
+        self.client.post(f"/api/patients/{r['patient_id']}/discharge",headers={'X-CSRF-Token':'test-token'},json={})
         bed = next(b for b in self.state()['beds'] if b['id']==6)
         self.assertEqual(bed['status'],'cleaning')
-        r = self.client.post('/api/emergency',json=self.patient(condition='icu',severity=5)).get_json()
-        self.client.post(f"/api/patients/{r['patient_id']}/discharge",json={})
+        r = self.client.post('/api/emergency',headers={'X-CSRF-Token':'test-token'},json=self.patient(condition='icu',severity=5)).get_json()
+        self.client.post(f"/api/patients/{r['patient_id']}/discharge",headers={'X-CSRF-Token':'test-token'},json={})
         bed = next(b for b in self.state()['beds'] if b['id']==r['bed']['id'])
         self.assertEqual(bed['status'],'ready')
 
@@ -91,7 +100,7 @@ class SystemTests(unittest.TestCase):
         with connect(self.path) as db:
             db.execute("UPDATE patients SET condition='general',severity=1 WHERE id=2")
             db.execute("UPDATE beds SET status='reserved' WHERE id IN (6,7)")
-        r = self.client.post('/api/emergency',json=self.patient(condition='icu',severity=5)).get_json()
+        r = self.client.post('/api/emergency',headers={'X-CSRF-Token':'test-token'},json=self.patient(condition='icu',severity=5)).get_json()
         self.assertEqual(r['status'],'waiting')
         self.assertEqual(r['shift_suggestions'][0]['patient_id'],2)
         self.assertEqual(next(p for p in self.state()['patients'] if p['id']==2)['bed_id'],5)
@@ -100,23 +109,24 @@ class SystemTests(unittest.TestCase):
         with connect(self.path) as db:
             db.execute("UPDATE patients SET condition='general',severity=1 WHERE id=2")
             db.execute("UPDATE beds SET status='reserved' WHERE id IN (6,7)")
-        r = self.client.post('/api/emergency',json=self.patient(condition='ventilator',severity=5)).get_json()
+        r = self.client.post('/api/emergency',headers={'X-CSRF-Token':'test-token'},json=self.patient(condition='ventilator',severity=5)).get_json()
         self.assertEqual(r['status'],'waiting')
         self.assertEqual(r['shift_suggestions'],[])
 
     def test_validation_and_double_discharge(self):
         for change in [dict(name=''),dict(gender='invalid'),dict(condition='invalid'),dict(severity=True),dict(severity=6)]:
-            self.assertEqual(self.client.post('/api/admit',json=self.patient(**change)).status_code,400)
-        self.assertEqual(self.client.post('/api/admit',json=[]).status_code,400)
-        self.assertEqual(self.client.post('/api/emergency',json=self.patient()).status_code,400)
-        self.assertEqual(self.client.post('/api/patients/999/discharge',json={}).status_code,400)
-        self.assertEqual(self.client.post('/api/patients/1/discharge',json={}).status_code,200)
-        self.assertEqual(self.client.post('/api/patients/1/discharge',json={}).status_code,400)
+            self.assertEqual(self.client.post('/api/admit',headers={'X-CSRF-Token':'test-token'},json=self.patient(**change)).status_code,400)
+        self.assertEqual(self.client.post('/api/admit',headers={'X-CSRF-Token':'test-token'},json=[]).status_code,400)
+        self.assertEqual(self.client.post('/api/emergency',headers={'X-CSRF-Token':'test-token'},json=self.patient()).status_code,400)
+        self.assertEqual(self.client.post('/api/patients/999/discharge',headers={'X-CSRF-Token':'test-token'},json={}).status_code,400)
+        self.assertEqual(self.client.post('/api/patients/1/discharge',headers={'X-CSRF-Token':'test-token'},json={}).status_code,200)
+        self.assertEqual(self.client.post('/api/patients/1/discharge',headers={'X-CSRF-Token':'test-token'},json={}).status_code,400)
 
     def test_concurrent_allocation(self):
         def admit(i):
             with self.app.test_client() as client:
-                return client.post('/api/admit',json=self.patient(name=f'Concurrent {i}')).get_json()
+                self.authenticate(client)
+                return client.post('/api/admit',headers={'X-CSRF-Token':'test-token'},json=self.patient(name=f'Concurrent {i}')).get_json()
         with ThreadPoolExecutor(max_workers=4) as pool:
             results = list(pool.map(admit,range(8)))
         ids = [r['bed']['id'] for r in results if r['bed']]

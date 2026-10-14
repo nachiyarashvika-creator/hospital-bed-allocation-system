@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 instance/
 .pytest_cache/
+*.db
+*.db-*
+*.session-key
+*.pre-login.bak

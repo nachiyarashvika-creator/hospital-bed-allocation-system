@@ -7,7 +7,8 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
 const displayStatus = value => value === 'ready' ? 'Ready' : value[0].toUpperCase() + value.slice(1);
 function notice(message, error = false) { $('#notice').textContent = message; $('#notice').className = error ? 'error' : ''; }
 async function api(path, data) {
-  const response = await fetch('/api/' + path, data === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+  const response = await fetch('/api/' + path, data === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':$('meta[name=csrf-token]').content}, body:JSON.stringify(data)});
+  if (response.status === 401) { window.location.assign('/login'); throw new Error('Session expired. Please sign in again.'); }
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || 'Request failed.');
   return result;
@@ -27,6 +28,10 @@ function render() {
   $('#active-patients').innerHTML = patientTable(state.patients.filter(p => ['admitted','reserved'].includes(p.status)));
   $('#waiting-patients').innerHTML = patientTable(state.patients.filter(p => p.status === 'waiting'), true);
   $('#cleaning-beds').innerHTML = state.beds.filter(b => b.status === 'cleaning').map(b => `<div class="cleaning-card">${esc(b.label)} · ${esc(b.kind)}<strong>${Math.max(0,Math.ceil(b.cleaning_until - state.server_time))} seconds remaining</strong></div>`).join('') || '<p>No beds are currently being cleaned.</p>';
+  const selectedWard = $('#ward-select').value;
+  $('#ward-select').innerHTML = state.wards.map(w => `<option value="${w.id}">${esc(w.name)}</option>`).join('');
+  if (state.wards.some(w => String(w.id) === selectedWard)) $('#ward-select').value = selectedWard;
+  $('#activity').innerHTML = state.activity.length ? '<table><thead><tr><th>Time</th><th>Action</th><th>Patient ID</th><th>Administrator</th></tr></thead><tbody>' + state.activity.map(a => `<tr><td>${esc(new Date(a.created_at*1000).toLocaleString())}</td><td>${esc(a.action)}</td><td>${a.patient_id ?? '—'}</td><td>${esc(a.email)}</td></tr>`).join('') + '</tbody></table>' : '<p>No activity yet. Admissions and other actions will appear here.</p>';
   $('#staff').textContent = 'Demo staff: ' + state.staff.map(p => `${p.name} (${p.role})`).join(' · ');
 }
 async function refresh() {
@@ -54,5 +59,7 @@ $('#emergency-form').addEventListener('submit', event => { event.preventDefault(
   event.target.reset();
 }); });
 document.addEventListener('click', event => { const button = event.target.closest('[data-discharge],[data-confirm]'); if (!button) return; action(async () => { const id = button.dataset.confirm || button.dataset.discharge; const operation = button.dataset.confirm ? 'confirm' : 'discharge'; const result = await api(`patients/${id}/${operation}`,{}); notice(result.message); }); });
+$('#ward-form').addEventListener('submit', event => { event.preventDefault(); action(async () => { await api('wards',Object.fromEntries(new FormData(event.target))); notice('Ward created for your hospital.'); event.target.reset(); }); });
+$('#bed-form').addEventListener('submit', event => { event.preventDefault(); action(async () => { const data=Object.fromEntries(new FormData(event.target)); data.ward_id=Number(data.ward_id); data.distance=Number(data.distance); data.ventilator=event.target.elements.ventilator.checked; await api('beds',data); notice('Ready bed added to your hospital.'); event.target.reset(); }); });
 refresh();
 setInterval(() => { if (!pending) refresh(); }, 2000);
